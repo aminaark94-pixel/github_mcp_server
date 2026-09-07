@@ -1,5 +1,4 @@
-# Replace stdio import with SSE and Starlette/Uvicorn dependencies
-# from mcp.server.stdio import stdio_server
+import logging
 
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
