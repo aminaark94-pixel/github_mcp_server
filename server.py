@@ -1,57 +1,126 @@
+"""
+Remote MCP Git Server — Streamable HTTP transport (for Render deployment)
+
+This replaces a stdio-based mcp-server-git style script with one that
+binds to Render's $PORT and speaks MCP over HTTP, so it can be added
+to Claude as a "Remote MCP server URL" custom connector.
+"""
+
+import os
 import logging
+import subprocess
+from pathlib import Path
+from typing import Optional
 
-from mcp.server.sse import SseServerTransport
-from starlette.applications import Starlette
-from starlette.routing import Route
-import uvicorn
+from mcp.server.fastmcp import FastMCP
 
-# ... (baaki saari Pydantic models, enums, aur Git functions same rahenge) ...
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-async def serve(repository: Path | None) -> None:
-    logger = logging.getLogger(__name__)
+REPO_PATH = os.environ.get("GIT_REPO_PATH", ".")
 
-    if repository is not None:
-        try:
-            git.Repo(repository)
-            logger.info(f"Using repository at {repository}")
-        except git.InvalidGitRepositoryError:
-            logger.error(f"{repository} is not a valid Git repository")
-            return
+mcp = FastMCP("mcp-git")
 
-    server = Server("mcp-git")
 
-    # ... (list_tools, list_repos, aur call_tool decorator handlers bilkul same rahenge) ...
+def run_git(args: list[str], repo_path: str = REPO_PATH) -> str:
+    """Run a git command inside repo_path and return combined output."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path] + args,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return output.strip() or "(no output)"
+    except Exception as e:
+        logger.exception("git command failed: %s", args)
+        return f"Error running git {' '.join(args)}: {e}"
 
-    # Setup SSE Transport
-    sse = SseServerTransport("/messages/")
 
-    async def handle_sse(request):
-        async with sse.connect_ssess(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await server.run(
-                streams[0],
-                streams[1],
-                server.create_initialization_options(),
-            )
+@mcp.tool()
+def git_status(repo_path: str = REPO_PATH) -> str:
+    """Show the working tree status of a git repository."""
+    return run_git(["status"], repo_path)
 
-    # Starlette App Routing
-    app = Starlette(
-        debug=True,
-        routes=[
-            Route("/sse", endpoint=handle_sse),
-            Route("/messages/", endpoint=sse.handle_post_message, methods=["POST"]),
-        ],
-    )
 
-    # Run Server with Uvicorn
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
-    uvicorn_server = uvicorn.Server(config)
-    await uvicorn_server.serve()
+@mcp.tool()
+def git_diff_unstaged(repo_path: str = REPO_PATH, context_lines: int = 3) -> str:
+    """Show changes in the working directory that are not yet staged."""
+    return run_git(["diff", f"--unified={context_lines}"], repo_path)
+
+
+@mcp.tool()
+def git_diff_staged(repo_path: str = REPO_PATH, context_lines: int = 3) -> str:
+    """Show changes that are staged for the next commit."""
+    return run_git(["diff", "--staged", f"--unified={context_lines}"], repo_path)
+
+
+@mcp.tool()
+def git_diff(repo_path: str, target: str, context_lines: int = 3) -> str:
+    """Show differences between the current state and a target branch/commit."""
+    return run_git(["diff", f"--unified={context_lines}", target], repo_path)
+
+
+@mcp.tool()
+def git_add(repo_path: str, files: list[str]) -> str:
+    """Stage the given file paths."""
+    return run_git(["add"] + files, repo_path)
+
+
+@mcp.tool()
+def git_commit(repo_path: str, message: str) -> str:
+    """Commit staged changes with the given message."""
+    return run_git(["commit", "-m", message], repo_path)
+
+
+@mcp.tool()
+def git_reset(repo_path: str = REPO_PATH) -> str:
+    """Unstage all currently staged changes."""
+    return run_git(["reset"], repo_path)
+
+
+@mcp.tool()
+def git_log(repo_path: str = REPO_PATH, max_count: int = 10) -> str:
+    """Show recent commit log entries."""
+    return run_git(["log", f"-{max_count}", "--pretty=format:%h | %an | %ad | %s", "--date=short"], repo_path)
+
+
+@mcp.tool()
+def git_create_branch(repo_path: str, branch_name: str, base_branch: Optional[str] = None) -> str:
+    """Create a new branch, optionally from a given base branch."""
+    args = ["branch", branch_name]
+    if base_branch:
+        args.append(base_branch)
+    return run_git(args, repo_path)
+
+
+@mcp.tool()
+def git_checkout(repo_path: str, branch_name: str) -> str:
+    """Switch to the given branch."""
+    return run_git(["checkout", branch_name], repo_path)
+
+
+@mcp.tool()
+def git_show(repo_path: str, revision: str) -> str:
+    """Show the contents / metadata of a given commit."""
+    return run_git(["show", revision], repo_path)
+
+
+@mcp.tool()
+def git_branch(repo_path: str = REPO_PATH, branch_type: str = "local") -> str:
+    """List git branches. branch_type: 'local', 'remote', or 'all'."""
+    flag = {"local": [], "remote": ["-r"], "all": ["-a"]}.get(branch_type, [])
+    return run_git(["branch"] + flag, repo_path)
+
 
 if __name__ == "__main__":
-    import asyncio
-    import sys
+    port = int(os.environ.get("PORT", 10000))
+    logger.info("Starting mcp-git streamable-http server on 0.0.0.0:%s", port)
 
-    repo_arg = Path(sys.argv[1]) if len(sys.argv) > 1 else None
-    asyncio.run(serve(repo_arg))
+    # FastMCP's streamable-http transport reads host/port from these settings.
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = port
+
+    # This serves MCP over HTTP at http://<host>:<port>/mcp
+    mcp.run(transport="streamable-http")
