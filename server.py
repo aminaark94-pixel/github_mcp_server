@@ -13,13 +13,25 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REPO_PATH = os.environ.get("GIT_REPO_PATH", ".")
 
-mcp = FastMCP("mcp-git")
+# The MCP SDK's DNS-rebinding protection only trusts "localhost" by default,
+# so every real request coming through Render's public domain gets rejected
+# with 421 "Invalid Host header". "*" is NOT a supported wildcard for
+# allowed_hosts (only "host:*" for any port, or "*.example.com" for
+# subdomains) — so the only reliable fix here is to turn the check off.
+# This server isn't browser-facing, so DNS rebinding isn't a real risk here.
+mcp = FastMCP(
+    "mcp-git",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+)
 
 
 def run_git(args: list[str], repo_path: str = REPO_PATH) -> str:
